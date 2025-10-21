@@ -17,12 +17,13 @@ model = MobileNetV2(weights="imagenet", include_top=False, pooling="avg")
 
 def get_db_connection():
     return mysql.connector.connect(
-        host=os.getenv("DB_HOST", "sql200.infinityfree.com"),
-        user=os.getenv("DB_USER", "if0_40211260"),
-        password=os.getenv("DB_PASS", ""),  # empty default for local
-        database=os.getenv("DB_NAME", "if0_40211260_fishencyclopedia")
+        host=os.getenv("DB_HOST"),
+        port=os.getenv("DB_PORT"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        database=os.getenv("DB_NAME"),
+        ssl_disabled=False  # Aiven requires SSL for secure connections
     )
-
 
 def get_embedding(img_data):
     img = Image.open(io.BytesIO(img_data)).convert("RGB").resize((224, 224))
