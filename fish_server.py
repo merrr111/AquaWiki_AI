@@ -17,10 +17,10 @@ model = MobileNetV2(weights="imagenet", include_top=False, pooling="avg")
 
 def get_db_connection():
     return mysql.connector.connect(
-        host="sql200.infinityfree.com",
-        user="if0_40211260",  # your MySQL username from InfinityFree
-        password="Hk76Yg78",  # replace with your InfinityFree vPanel password
-        database="if0_40211260_fishencyclopedia"
+        host=os.getenv("DB_HOST", "sql200.infinityfree.com"),
+        user=os.getenv("DB_USER", "if0_40211260"),
+        password=os.getenv("DB_PASS", ""),  # empty default for local
+        database=os.getenv("DB_NAME", "if0_40211260_fishencyclopedia")
     )
 
 
