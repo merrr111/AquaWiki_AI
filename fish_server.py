@@ -19,7 +19,7 @@ def get_db_connection():
     return mysql.connector.connect(
         host="sql200.infinityfree.com",
         user="if0_40211260",  # your MySQL username from InfinityFree
-        password="your_vpanel_password_here",  # replace with your InfinityFree vPanel password
+        password="Hk76Yg78",  # replace with your InfinityFree vPanel password
         database="if0_40211260_fishencyclopedia"
     )
 
