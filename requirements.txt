@@ -5,3 +5,4 @@ keras
 numpy
 pillow
 python-multipart
+mysql-connector-python

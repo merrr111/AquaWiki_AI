@@ -17,11 +17,12 @@ model = MobileNetV2(weights="imagenet", include_top=False, pooling="avg")
 
 def get_db_connection():
     return mysql.connector.connect(
-        host="localhost",
-        user="root",
-        password="",
-        database="fishencyclopedia"
+        host="sql200.infinityfree.com",
+        user="if0_40211260",  # your MySQL username from InfinityFree
+        password="your_vpanel_password_here",  # replace with your InfinityFree vPanel password
+        database="if0_40211260_fishencyclopedia"
     )
+
 
 def get_embedding(img_data):
     img = Image.open(io.BytesIO(img_data)).convert("RGB").resize((224, 224))
