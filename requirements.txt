@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+tensorflow-cpu
+pillow
+mysql-connector-python
+numpy
