@@ -86,10 +86,10 @@ async def identify(file: UploadFile = File(...)):
 # ---------------------------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "fish_server:app",  # module:app
-        host="127.0.0.1",
-        port=8000,
-        log_level="info",
-        reload=False  # PM2 will handle restarts
-    )
+   uvicorn.run(
+    "fish_server:app",
+    host="0.0.0.0",
+    port=int(os.getenv("PORT", 10000)),
+    log_level="info"
+)
+
