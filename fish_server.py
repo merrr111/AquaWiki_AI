@@ -1,28 +1,36 @@
 from fastapi import FastAPI, UploadFile, File
 import numpy as np
-import json, io
+import json, io, os, tempfile
 from PIL import Image
 from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input
 from tensorflow.keras.preprocessing import image
 import mysql.connector
-import os
 
-# Reduce TF logging
+# Reduce TensorFlow logs
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 app = FastAPI(title="Fish Identification API")
 
-# Load MobileNetV2 once
+# Load the model once
 model = MobileNetV2(weights="imagenet", include_top=False, pooling="avg")
 
 def get_db_connection():
+    ca_content = os.getenv("CA_CERT")
+
+    # Write the CA cert to a temp file if available
+    ca_path = None
+    if ca_content:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pem") as temp_ca:
+            temp_ca.write(ca_content.encode())
+            ca_path = temp_ca.name
+
     return mysql.connector.connect(
         host=os.getenv("DB_HOST"),
-        port=int(os.getenv("DB_PORT")),
+        port=int(os.getenv("DB_PORT", "3306")),
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASS"),
         database=os.getenv("DB_NAME"),
-        ssl_ca="ca.pem"
+        ssl_ca=ca_path if os.getenv("DB_SSL", "false").lower() == "true" else None
     )
 
 def get_embedding(img_data):
@@ -67,13 +75,9 @@ async def identify(file: UploadFile = File(...)):
                 "score": float(score)
             })
 
-    # Sort by similarity score descending
     matches.sort(key=lambda x: x["score"], reverse=True)
 
-    # Best match is the first one above threshold
     best_match = next((m for m in matches if m["score"] > 0.5), None)
-
-    # Other similar fishes: top 5 excluding the best match
     other_similar = [m for m in matches if m != best_match][:5]
 
     return {
@@ -82,14 +86,13 @@ async def identify(file: UploadFile = File(...)):
     }
 
 # ---------------------------
-# PM2 / direct run support
+# Run directly (Render entry point)
 # ---------------------------
 if __name__ == "__main__":
     import uvicorn
-   uvicorn.run(
-    "fish_server:app",
-    host="0.0.0.0",
-    port=int(os.getenv("PORT", 10000)),
-    log_level="info"
-)
-
+    uvicorn.run(
+        "fish_server:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 10000)),
+        log_level="info"
+    )
