@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Request
 import numpy as np
 import json, io, os, tempfile
 from PIL import Image
@@ -85,7 +85,13 @@ async def identify(file: UploadFile = File(...)):
         "other_similar_fishes": other_similar
     }
 
-from fastapi import Request
+@app.get("/")
+async def root():
+    return {"message": "Welcome to the Fish Identification API"}
+
+@app.get("/update_fish_data")
+async def update_fish_data_get():
+    return {"message": "This endpoint only accepts POST requests."}
 
 @app.post("/update_fish_data")
 async def update_fish_data(request: Request):
@@ -154,7 +160,6 @@ async def update_fish_data(request: Request):
         conn.close()
 
 # Run directly (Render entry point)
-# ---------------------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
