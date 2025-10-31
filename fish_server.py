@@ -85,7 +85,74 @@ async def identify(file: UploadFile = File(...)):
         "other_similar_fishes": other_similar
     }
 
-# ---------------------------
+from fastapi import Request
+
+@app.post("/update_fish_data")
+async def update_fish_data(request: Request):
+    """Generate embeddings & hashes for a fish after upload"""
+    import imagehash
+    from urllib.request import urlopen
+
+    data = await request.json()
+    fish_id = data.get("fish_id")
+    image_url = data.get("image_url")
+    image_male_url = data.get("image_male_url")
+
+    def download_image(url):
+        return Image.open(io.BytesIO(urlopen(url).read())).convert("RGB")
+
+    def calculate_hash(img):
+        return str(imagehash.phash(img))
+
+    def compute_embedding(img):
+        img_resized = img.resize((224, 224))
+        x = image.img_to_array(img_resized)
+        x = np.expand_dims(x, axis=0)
+        x = preprocess_input(x)
+        return model.predict(x)[0].tolist()
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        # Female image
+        female_img = download_image(image_url)
+        female_hash = calculate_hash(female_img)
+        female_emb = compute_embedding(female_img)
+
+        # Male (optional)
+        male_hash, male_emb = None, None
+        if image_male_url:
+            male_img = download_image(image_male_url)
+            male_hash = calculate_hash(male_img)
+            male_emb = compute_embedding(male_img)
+
+        # Save to database
+        cursor.execute("""
+            UPDATE fishes SET
+                image_hash = %s,
+                image_male_hash = %s,
+                embedding = %s,
+                embedding_male = %s
+            WHERE id = %s
+        """, (
+            female_hash,
+            male_hash,
+            json.dumps(female_emb),
+            json.dumps(male_emb) if male_emb else None,
+            fish_id
+        ))
+        conn.commit()
+
+        return {"status": "success", "message": f"Updated embeddings and hashes for fish ID {fish_id}"}
+
+    except Exception as e:
+        conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        cursor.close()
+        conn.close()
+
 # Run directly (Render entry point)
 # ---------------------------
 if __name__ == "__main__":
