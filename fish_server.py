@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, Request
 import numpy as np
-import json, io, os, tempfile
+import json, io, os
 from PIL import Image
 from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input
 from tensorflow.keras.preprocessing import image
@@ -15,22 +15,12 @@ app = FastAPI(title="Fish Identification API")
 model = MobileNetV2(weights="imagenet", include_top=False, pooling="avg")
 
 def get_db_connection():
-    ca_content = os.getenv("CA_CERT")
-
-    # Write the CA cert to a temp file if available
-    ca_path = None
-    if ca_content:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pem") as temp_ca:
-            temp_ca.write(ca_content.encode())
-            ca_path = temp_ca.name
-
     return mysql.connector.connect(
         host=os.getenv("DB_HOST"),
         port=int(os.getenv("DB_PORT", "3306")),
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASS"),
-        database=os.getenv("DB_NAME"),
-        ssl_ca=ca_path if os.getenv("DB_SSL", "false").lower() == "true" else None
+        database=os.getenv("DB_NAME")
     )
 
 def get_embedding(img_data):
