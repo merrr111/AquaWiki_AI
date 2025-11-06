@@ -14,6 +14,10 @@ app = FastAPI(title="Fish Identification API")
 # Load the model once
 model = MobileNetV2(weights="imagenet", include_top=False, pooling="avg")
 
+ca_content = os.getenv("DB_CA_CONTENT")
+with open("/tmp/ca.pem", "w") as f:
+    f.write(ca_content)
+
 def get_db_connection():
     return mysql.connector.connect(
         host=os.getenv("DB_HOST"),
@@ -21,7 +25,7 @@ def get_db_connection():
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASSWORD"),
         database=os.getenv("DB_NAME"),
-        ssl_ca=os.getenv("DB_CA_PATH"),
+        ssl_ca="/tmp/ca.pem",
         ssl_verify_cert=True
     )
 
