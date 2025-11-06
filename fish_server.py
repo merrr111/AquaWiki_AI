@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, Request
 import numpy as np
-import json, io, os
+import json, io, os, traceback
 from PIL import Image
 from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input
 from tensorflow.keras.preprocessing import image
@@ -35,45 +35,53 @@ def cosine_similarity(vec1, vec2):
 
 @app.post("/identify")
 async def identify(file: UploadFile = File(...)):
-    img_data = await file.read()
-    query_emb = get_embedding(img_data)
+    try:
+        img_data = await file.read()
+        query_emb = get_embedding(img_data)
 
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM fishes")
-    fishes = cursor.fetchall()
-    conn.close()
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT * FROM fishes")
+        fishes = cursor.fetchall()
+        conn.close()
 
-    matches = []
+        matches = []
 
-    for fish in fishes:
-        for sex, emb_field, img_field in [
-            ("female", "embedding", "image_url"),
-            ("male", "embedding_male", "image_male_url")
-        ]:
-            emb_str = fish.get(emb_field)
-            if not emb_str:
-                continue
-            fish_emb = np.array(json.loads(emb_str))
-            score = cosine_similarity(query_emb, fish_emb)
-            matches.append({
-                "id": fish["id"],
-                "name": fish["name"],
-                "matched_image_url": fish.get(img_field),
-                "match_type": sex,
-                "description": fish["description"] if sex == "female" else fish.get("male_description"),
-                "score": float(score)
-            })
+        for fish in fishes:
+            for sex, emb_field, img_field in [
+                ("female", "embedding", "image_url"),
+                ("male", "embedding_male", "image_male_url")
+            ]:
+                emb_str = fish.get(emb_field)
+                if not emb_str:
+                    continue
+                try:
+                    fish_emb = np.array(json.loads(emb_str))
+                    score = cosine_similarity(query_emb, fish_emb)
+                    matches.append({
+                        "id": fish["id"],
+                        "name": fish["name"],
+                        "matched_image_url": fish.get(img_field),
+                        "match_type": sex,
+                        "description": fish["description"] if sex == "female" else fish.get("male_description"),
+                        "score": float(score)
+                    })
+                except Exception as e:
+                    print(f"Skipping fish ID {fish['id']} due to embedding error: {e}")
+                    continue
 
-    matches.sort(key=lambda x: x["score"], reverse=True)
+        matches.sort(key=lambda x: x["score"], reverse=True)
+        best_match = next((m for m in matches if m["score"] > 0.5), None)
+        other_similar = [m for m in matches if m != best_match][:5]
 
-    best_match = next((m for m in matches if m["score"] > 0.5), None)
-    other_similar = [m for m in matches if m != best_match][:5]
+        return {
+            "matched_fish": best_match,
+            "other_similar_fishes": other_similar
+        }
 
-    return {
-        "matched_fish": best_match,
-        "other_similar_fishes": other_similar
-    }
+    except Exception as e:
+        traceback.print_exc()
+        return {"error": "Internal server error", "details": str(e)}
 
 @app.get("/")
 async def root():
@@ -89,28 +97,28 @@ async def update_fish_data(request: Request):
     import imagehash
     from urllib.request import urlopen
 
-    data = await request.json()
-    fish_id = data.get("fish_id")
-    image_url = data.get("image_url")
-    image_male_url = data.get("image_male_url")
-
-    def download_image(url):
-        return Image.open(io.BytesIO(urlopen(url).read())).convert("RGB")
-
-    def calculate_hash(img):
-        return str(imagehash.phash(img))
-
-    def compute_embedding(img):
-        img_resized = img.resize((224, 224))
-        x = image.img_to_array(img_resized)
-        x = np.expand_dims(x, axis=0)
-        x = preprocess_input(x)
-        return model.predict(x)[0].tolist()
-
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
     try:
+        data = await request.json()
+        fish_id = data.get("fish_id")
+        image_url = data.get("image_url")
+        image_male_url = data.get("image_male_url")
+
+        def download_image(url):
+            return Image.open(io.BytesIO(urlopen(url).read())).convert("RGB")
+
+        def calculate_hash(img):
+            return str(imagehash.phash(img))
+
+        def compute_embedding(img):
+            img_resized = img.resize((224, 224))
+            x = image.img_to_array(img_resized)
+            x = np.expand_dims(x, axis=0)
+            x = preprocess_input(x)
+            return model.predict(x)[0].tolist()
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
         # Female image
         female_img = download_image(image_url)
         female_hash = calculate_hash(female_img)
@@ -143,11 +151,16 @@ async def update_fish_data(request: Request):
         return {"status": "success", "message": f"Updated embeddings and hashes for fish ID {fish_id}"}
 
     except Exception as e:
-        conn.rollback()
+        if 'conn' in locals():
+            conn.rollback()
+        traceback.print_exc()
         return {"status": "error", "message": str(e)}
+
     finally:
-        cursor.close()
-        conn.close()
+        if 'cursor' in locals():
+            cursor.close()
+        if 'conn' in locals():
+            conn.close()
 
 # Run directly (Render entry point)
 if __name__ == "__main__":
