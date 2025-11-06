@@ -5,6 +5,7 @@ from PIL import Image
 from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input
 from tensorflow.keras.preprocessing import image
 import mysql.connector
+import tempfile
 
 # Reduce TensorFlow logs
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
@@ -14,19 +15,21 @@ app = FastAPI(title="Fish Identification API")
 # Load the model once
 model = MobileNetV2(weights="imagenet", include_top=False, pooling="avg")
 
-ca_content = os.getenv("DB_CA_CONTENT")
-with open("/tmp/ca.pem", "w") as f:
-    f.write(ca_content)
-
 def get_db_connection():
+    ca_content = os.getenv("CA_CERT")
+    ca_path = None
+    if ca_content:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pem") as temp_ca:
+            temp_ca.write(ca_content.encode())
+            ca_path = temp_ca.name
+
     return mysql.connector.connect(
         host=os.getenv("DB_HOST"),
-        port=int(os.getenv("DB_PORT")),
+        port=int(os.getenv("DB_PORT", "3306")),
         user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
+        password=os.getenv("DB_PASS"),
         database=os.getenv("DB_NAME"),
-        ssl_ca="/tmp/ca.pem",
-        ssl_verify_cert=True
+        ssl_ca=ca_path if os.getenv("DB_SSL", "false").lower() == "true" else None
     )
 
 def get_embedding(img_data):
