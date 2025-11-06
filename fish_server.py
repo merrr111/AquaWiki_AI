@@ -16,11 +16,13 @@ model = MobileNetV2(weights="imagenet", include_top=False, pooling="avg")
 
 def get_db_connection():
     return mysql.connector.connect(
-        host="localhost",            # Hostinger MySQL host
-        port=3306,                   # Standard MySQL port
-        user="u915767734_admin",     # Your Hostinger DB user
-        password="Hk76Yg78*",        # Your Hostinger DB password
-        database="u915767734_aquawiki"  # Your Hostinger DB name
+        host=os.getenv("DB_HOST"),
+        port=int(os.getenv("DB_PORT")),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        database=os.getenv("DB_NAME"),
+        ssl_ca=os.getenv("DB_CA_PATH"),
+        ssl_verify_cert=True
     )
 
 def get_embedding(img_data):
