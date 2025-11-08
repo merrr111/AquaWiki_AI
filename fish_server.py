@@ -102,9 +102,9 @@ async def update_fish_data_get():
 
 @app.post("/update_fish_data")
 async def update_fish_data(request: Request):
-    """Generate embeddings & hashes for a fish after upload"""
+    """Generate embeddings & hashes for a fish after upload (async image download)"""
     import imagehash
-    from urllib.request import urlopen
+    import httpx
 
     try:
         data = await request.json()
@@ -112,8 +112,11 @@ async def update_fish_data(request: Request):
         image_url = data.get("image_url")
         image_male_url = data.get("image_male_url")
 
-        def download_image(url):
-            return Image.open(io.BytesIO(urlopen(url).read())).convert("RGB")
+        async def download_image(url):
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                return Image.open(io.BytesIO(resp.content)).convert("RGB")
 
         def calculate_hash(img):
             return str(imagehash.phash(img))
@@ -129,14 +132,14 @@ async def update_fish_data(request: Request):
         cursor = conn.cursor()
 
         # Female image
-        female_img = download_image(image_url)
+        female_img = await download_image(image_url)
         female_hash = calculate_hash(female_img)
         female_emb = compute_embedding(female_img)
 
-        # Male (optional)
+        # Male image (optional)
         male_hash, male_emb = None, None
         if image_male_url:
-            male_img = download_image(image_male_url)
+            male_img = await download_image(image_male_url)
             male_hash = calculate_hash(male_img)
             male_emb = compute_embedding(male_img)
 
