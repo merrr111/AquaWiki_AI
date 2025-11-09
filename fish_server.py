@@ -16,20 +16,12 @@ app = FastAPI(title="Fish Identification API")
 model = MobileNetV2(weights="imagenet", include_top=False, pooling="avg")
 
 def get_db_connection():
-    ca_content = os.getenv("CA_CERT")
-    ca_path = None
-    if ca_content:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pem") as temp_ca:
-            temp_ca.write(ca_content.encode())
-            ca_path = temp_ca.name
-
     return mysql.connector.connect(
-        host=os.getenv("DB_HOST"),
-        port=int(os.getenv("DB_PORT", "3306")),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASS"),
-        database=os.getenv("DB_NAME"),
-        ssl_ca=ca_path if os.getenv("DB_SSL", "false").lower() == "true" else None
+        host="srv2088.hstgr.io",      # Hostinger MySQL server
+        port=3306,
+        user="u915767734_admin",      # Your DB user
+        password="Hk76Yg78*",         # Your DB password
+        database="u915767734_aquawiki"
     )
 
 def get_embedding(img_data):
@@ -173,6 +165,39 @@ async def update_fish_data(request: Request):
             cursor.close()
         if 'conn' in locals():
             conn.close()
+
+@app.post("/update_all_fishes")
+async def update_all_fishes():
+    """
+    Update embeddings and hashes for all fishes in the database.
+    """
+    import httpx
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT id, image_url, image_male_url FROM fishes")
+    fishes = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    results = []
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        for fish in fishes:
+            try:
+                resp = await client.post(
+                    "https://aquawiki-ai-1bh3.onrender.com/update_fish_data",
+                    json={
+                        "fish_id": fish["id"],
+                        "image_url": fish["image_url"],
+                        "image_male_url": fish.get("image_male_url") or ""
+                    }
+                )
+                results.append(await resp.json())
+            except Exception as e:
+                results.append({"fish_id": fish["id"], "status": "error", "message": str(e)})
+
+    return {"status": "success", "results": results}
 
 # Run directly (Render entry point)
 if __name__ == "__main__":
