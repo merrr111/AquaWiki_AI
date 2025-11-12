@@ -23,10 +23,10 @@ print("🔥 Model warmed up and ready for predictions!")
 
 def get_db_connection():
     return mysql.connector.connect(
-        host="srv2088.hstgr.io",      # Hostinger MySQL server
+        host="srv2088.hstgr.io",
         port=3306,
-        user="u915767734_admin",      # Your DB user
-        password="Hk76Yg78*",         # Your DB password
+        user="u915767734_admin",
+        password="Hk76Yg78*",
         database="u915767734_aquawiki"
     )
 
@@ -34,14 +34,20 @@ def get_embedding(img_data):
     # Fix EXIF rotation
     img = Image.open(io.BytesIO(img_data)).convert("RGB")
     img = ImageOps.exif_transpose(img)
-    img = img.resize((224, 224))
-    x = image.img_to_array(img)
+    img_resized = img.resize((224, 224))
+    x = image.img_to_array(img_resized)
     x = np.expand_dims(x, axis=0)
     x = preprocess_input(x)
     emb = model.predict(x)[0]
-    # Normalize embedding
-    emb = emb / (np.linalg.norm(emb) + 1e-10)
-    return emb
+    return emb / (np.linalg.norm(emb) + 1e-10)  # normalize
+
+def get_color_histogram(img, bins=16):
+    """Compute normalized RGB histogram"""
+    hist_r = np.histogram(np.array(img)[:, :, 0], bins=bins, range=(0, 256))[0]
+    hist_g = np.histogram(np.array(img)[:, :, 1], bins=bins, range=(0, 256))[0]
+    hist_b = np.histogram(np.array(img)[:, :, 2], bins=bins, range=(0, 256))[0]
+    hist = np.concatenate([hist_r, hist_g, hist_b]).astype(np.float32)
+    return hist / (np.linalg.norm(hist) + 1e-10)
 
 def cosine_similarity(vec1, vec2):
     vec1 = vec1 / (np.linalg.norm(vec1) + 1e-10)
@@ -53,6 +59,8 @@ async def identify(file: UploadFile = File(...)):
     try:
         img_data = await file.read()
         query_emb = get_embedding(img_data)
+        query_img = Image.open(io.BytesIO(img_data)).convert("RGB")
+        query_hist = get_color_histogram(query_img)
 
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
@@ -68,23 +76,37 @@ async def identify(file: UploadFile = File(...)):
                 ("male", "embedding_male", "image_male_url")
             ]:
                 emb_str = fish.get(emb_field)
-                if not emb_str:
+                img_url = fish.get(img_field)
+                if not emb_str or not img_url:
                     continue
                 try:
                     fish_emb = np.array(json.loads(emb_str))
-                    # Normalize stored embeddings as well
                     fish_emb = fish_emb / (np.linalg.norm(fish_emb) + 1e-10)
-                    score = cosine_similarity(query_emb, fish_emb)
+
+                    # Compute histogram for comparison
+                    try:
+                        resp = requests.get(img_url, timeout=5)
+                        fish_img = Image.open(io.BytesIO(resp.content)).convert("RGB")
+                        fish_hist = get_color_histogram(fish_img)
+                    except:
+                        fish_hist = None
+
+                    emb_score = cosine_similarity(query_emb, fish_emb)
+                    color_score = cosine_similarity(query_hist, fish_hist) if fish_hist is not None else 0.0
+                    # Weighted combination
+                    final_score = 0.7 * emb_score + 0.3 * color_score
+
                     matches.append({
                         "id": fish["id"],
                         "name": fish["name"],
-                        "matched_image_url": fish.get(img_field),
+                        "matched_image_url": img_url,
                         "match_type": sex,
                         "description": fish["description"] if sex == "female" else fish.get("male_description"),
-                        "score": float(score)
+                        "score": float(final_score)
                     })
+
                 except Exception as e:
-                    print(f"Skipping fish ID {fish['id']} due to embedding error: {e}")
+                    print(f"Skipping fish ID {fish['id']} due to error: {e}")
                     continue
 
         matches.sort(key=lambda x: x["score"], reverse=True)
