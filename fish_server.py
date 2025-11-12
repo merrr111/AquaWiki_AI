@@ -32,38 +32,34 @@ def get_db_connection():
         database="u915767734_aquawiki"
     )
 
+from PIL import ImageOps, ImageEnhance
+
 def get_embedding(img_data):
-    # Load and fix rotation
+    # Fix EXIF rotation
     img = Image.open(io.BytesIO(img_data)).convert("RGB")
     img = ImageOps.exif_transpose(img)
-
-    embeddings = []
-
-    # Augment: rotate -30°, -15°, 0°, +15°, +30° and add mirrored versions
-    angles = [-30, -15, 0, 15, 30]
-    for angle in angles:
-        rotated = img.rotate(angle)
-        for flip in [False, True]:
-            rotated_flipped = ImageOps.mirror(rotated) if flip else rotated
-            img_resized = rotated_flipped.resize((224, 224))
-            x = image.img_to_array(img_resized)
-            x = np.expand_dims(x, axis=0)
-            x = preprocess_input(x)
-            emb = model.predict(x)[0]
-            embeddings.append(emb / (np.linalg.norm(emb) + 1e-10))
-
-    # Average all embeddings to get a robust final embedding
-    final_embedding = np.mean(embeddings, axis=0)
-    return final_embedding / (np.linalg.norm(final_embedding) + 1e-10)
-
+    
+    # Optional: Slight auto-contrast to handle lighting differences
+    img = ImageOps.autocontrast(img, cutoff=2)
+    
+    # Resize while keeping aspect ratio
+    img_resized = ImageOps.fit(img, (224, 224), Image.LANCZOS)
+    
+    x = image.img_to_array(img_resized)
+    x = np.expand_dims(x, axis=0)
+    x = preprocess_input(x)
+    emb = model.predict(x)[0]
+    return emb / (np.linalg.norm(emb) + 1e-10)
 
 def get_color_histogram(img, bins=16):
-    """Compute normalized RGB histogram"""
+    """Compute normalized RGB histogram with slight enhancement"""
+    img = ImageOps.autocontrast(img, cutoff=2)  # normalize lighting
     hist_r = np.histogram(np.array(img)[:, :, 0], bins=bins, range=(0, 256))[0]
     hist_g = np.histogram(np.array(img)[:, :, 1], bins=bins, range=(0, 256))[0]
     hist_b = np.histogram(np.array(img)[:, :, 2], bins=bins, range=(0, 256))[0]
     hist = np.concatenate([hist_r, hist_g, hist_b]).astype(np.float32)
     return hist / (np.linalg.norm(hist) + 1e-10)
+
 
 def cosine_similarity(vec1, vec2):
     vec1 = vec1 / (np.linalg.norm(vec1) + 1e-10)
