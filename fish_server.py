@@ -6,8 +6,6 @@ from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_i
 from tensorflow.keras.preprocessing import image
 import mysql.connector
 import tempfile
-import requests
-
 
 # Reduce TensorFlow logs
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
@@ -32,34 +30,24 @@ def get_db_connection():
         database="u915767734_aquawiki"
     )
 
-from PIL import ImageOps, ImageEnhance
-
 def get_embedding(img_data):
     # Fix EXIF rotation
     img = Image.open(io.BytesIO(img_data)).convert("RGB")
     img = ImageOps.exif_transpose(img)
-    
-    # Optional: Slight auto-contrast to handle lighting differences
-    img = ImageOps.autocontrast(img, cutoff=2)
-    
-    # Resize while keeping aspect ratio
-    img_resized = ImageOps.fit(img, (224, 224), Image.LANCZOS)
-    
+    img_resized = img.resize((224, 224))
     x = image.img_to_array(img_resized)
     x = np.expand_dims(x, axis=0)
     x = preprocess_input(x)
     emb = model.predict(x)[0]
-    return emb / (np.linalg.norm(emb) + 1e-10)
+    return emb / (np.linalg.norm(emb) + 1e-10)  # normalize
 
 def get_color_histogram(img, bins=16):
-    """Compute normalized RGB histogram with slight enhancement"""
-    img = ImageOps.autocontrast(img, cutoff=2)  # normalize lighting
+    """Compute normalized RGB histogram"""
     hist_r = np.histogram(np.array(img)[:, :, 0], bins=bins, range=(0, 256))[0]
     hist_g = np.histogram(np.array(img)[:, :, 1], bins=bins, range=(0, 256))[0]
     hist_b = np.histogram(np.array(img)[:, :, 2], bins=bins, range=(0, 256))[0]
     hist = np.concatenate([hist_r, hist_g, hist_b]).astype(np.float32)
     return hist / (np.linalg.norm(hist) + 1e-10)
-
 
 def cosine_similarity(vec1, vec2):
     vec1 = vec1 / (np.linalg.norm(vec1) + 1e-10)
