@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Request
 import numpy as np
 import json, io, os, traceback
-from PIL import Image
+from PIL import Image, ImageOps
 from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input
 from tensorflow.keras.preprocessing import image
 import mysql.connector
@@ -31,14 +31,22 @@ def get_db_connection():
     )
 
 def get_embedding(img_data):
-    img = Image.open(io.BytesIO(img_data)).convert("RGB").resize((224, 224))
+    # Fix EXIF rotation
+    img = Image.open(io.BytesIO(img_data)).convert("RGB")
+    img = ImageOps.exif_transpose(img)
+    img = img.resize((224, 224))
     x = image.img_to_array(img)
     x = np.expand_dims(x, axis=0)
     x = preprocess_input(x)
-    return model.predict(x)[0]
+    emb = model.predict(x)[0]
+    # Normalize embedding
+    emb = emb / (np.linalg.norm(emb) + 1e-10)
+    return emb
 
 def cosine_similarity(vec1, vec2):
-    return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec1) + 1e-10)
+    vec1 = vec1 / (np.linalg.norm(vec1) + 1e-10)
+    vec2 = vec2 / (np.linalg.norm(vec2) + 1e-10)
+    return float(np.dot(vec1, vec2))
 
 @app.post("/identify")
 async def identify(file: UploadFile = File(...)):
@@ -64,6 +72,8 @@ async def identify(file: UploadFile = File(...)):
                     continue
                 try:
                     fish_emb = np.array(json.loads(emb_str))
+                    # Normalize stored embeddings as well
+                    fish_emb = fish_emb / (np.linalg.norm(fish_emb) + 1e-10)
                     score = cosine_similarity(query_emb, fish_emb)
                     matches.append({
                         "id": fish["id"],
@@ -114,7 +124,9 @@ async def update_fish_data(request: Request):
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
-                return Image.open(io.BytesIO(resp.content)).convert("RGB")
+                img = Image.open(io.BytesIO(resp.content)).convert("RGB")
+                img = ImageOps.exif_transpose(img)  # fix rotation
+                return img
 
         def calculate_hash(img):
             return str(imagehash.phash(img))
@@ -124,7 +136,8 @@ async def update_fish_data(request: Request):
             x = image.img_to_array(img_resized)
             x = np.expand_dims(x, axis=0)
             x = preprocess_input(x)
-            return model.predict(x)[0].tolist()
+            emb = model.predict(x)[0]
+            return emb / (np.linalg.norm(emb) + 1e-10)  # normalize
 
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -152,8 +165,8 @@ async def update_fish_data(request: Request):
         """, (
             female_hash,
             male_hash,
-            json.dumps(female_emb),
-            json.dumps(male_emb) if male_emb else None,
+            json.dumps(female_emb.tolist()),
+            json.dumps(male_emb.tolist()) if male_emb else None,
             fish_id
         ))
         conn.commit()
