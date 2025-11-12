@@ -6,6 +6,8 @@ from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_i
 from tensorflow.keras.preprocessing import image
 import mysql.connector
 import tempfile
+import requests
+
 
 # Reduce TensorFlow logs
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
@@ -31,15 +33,29 @@ def get_db_connection():
     )
 
 def get_embedding(img_data):
-    # Fix EXIF rotation
+    # Load and fix rotation
     img = Image.open(io.BytesIO(img_data)).convert("RGB")
     img = ImageOps.exif_transpose(img)
-    img_resized = img.resize((224, 224))
-    x = image.img_to_array(img_resized)
-    x = np.expand_dims(x, axis=0)
-    x = preprocess_input(x)
-    emb = model.predict(x)[0]
-    return emb / (np.linalg.norm(emb) + 1e-10)  # normalize
+
+    embeddings = []
+
+    # Augment: rotate -30°, -15°, 0°, +15°, +30° and add mirrored versions
+    angles = [-30, -15, 0, 15, 30]
+    for angle in angles:
+        rotated = img.rotate(angle)
+        for flip in [False, True]:
+            rotated_flipped = ImageOps.mirror(rotated) if flip else rotated
+            img_resized = rotated_flipped.resize((224, 224))
+            x = image.img_to_array(img_resized)
+            x = np.expand_dims(x, axis=0)
+            x = preprocess_input(x)
+            emb = model.predict(x)[0]
+            embeddings.append(emb / (np.linalg.norm(emb) + 1e-10))
+
+    # Average all embeddings to get a robust final embedding
+    final_embedding = np.mean(embeddings, axis=0)
+    return final_embedding / (np.linalg.norm(final_embedding) + 1e-10)
+
 
 def get_color_histogram(img, bins=16):
     """Compute normalized RGB histogram"""
