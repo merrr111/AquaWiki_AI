@@ -15,6 +15,12 @@ app = FastAPI(title="Fish Identification API")
 # Load the model once
 model = MobileNetV2(weights="imagenet", include_top=False, pooling="avg")
 
+# === Warm up the model on startup to prevent first-upload delay ===
+print("🐟 Warming up MobileNetV2 model...")
+dummy = np.zeros((1, 224, 224, 3), dtype=np.float32)
+_ = model.predict(dummy)
+print("🔥 Model warmed up and ready for predictions!")
+
 def get_db_connection():
     return mysql.connector.connect(
         host="srv2088.hstgr.io",      # Hostinger MySQL server
@@ -32,7 +38,7 @@ def get_embedding(img_data):
     return model.predict(x)[0]
 
 def cosine_similarity(vec1, vec2):
-    return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2) + 1e-10)
+    return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec1) + 1e-10)
 
 @app.post("/identify")
 async def identify(file: UploadFile = File(...)):
