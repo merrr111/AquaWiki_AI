@@ -110,7 +110,7 @@ async def identify(file: UploadFile = File(...)):
                     continue
 
         matches.sort(key=lambda x: x["score"], reverse=True)
-        best_match = next((m for m in matches if m["score"] > 0.5), None)
+        best_match = next((m for m in matches if m["score"] > 0.3), None)
         other_similar = [m for m in matches if m != best_match][:5]
 
         return {
