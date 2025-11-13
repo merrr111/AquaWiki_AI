@@ -1,11 +1,10 @@
 from fastapi import FastAPI, UploadFile, File, Request
 import numpy as np
-import json, io, os, traceback
+import json, io, os, traceback, requests
 from PIL import Image, ImageOps
 from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input
 from tensorflow.keras.preprocessing import image
 import mysql.connector
-import tempfile
 
 # Reduce TensorFlow logs
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
@@ -31,7 +30,6 @@ def get_db_connection():
     )
 
 def get_embedding(img_data):
-    # Fix EXIF rotation
     img = Image.open(io.BytesIO(img_data)).convert("RGB")
     img = ImageOps.exif_transpose(img)
     img_resized = img.resize((224, 224))
@@ -39,10 +37,9 @@ def get_embedding(img_data):
     x = np.expand_dims(x, axis=0)
     x = preprocess_input(x)
     emb = model.predict(x)[0]
-    return emb / (np.linalg.norm(emb) + 1e-10)  # normalize
+    return emb / (np.linalg.norm(emb) + 1e-10)
 
 def get_color_histogram(img, bins=16):
-    """Compute normalized RGB histogram"""
     hist_r = np.histogram(np.array(img)[:, :, 0], bins=bins, range=(0, 256))[0]
     hist_g = np.histogram(np.array(img)[:, :, 1], bins=bins, range=(0, 256))[0]
     hist_b = np.histogram(np.array(img)[:, :, 2], bins=bins, range=(0, 256))[0]
@@ -93,7 +90,6 @@ async def identify(file: UploadFile = File(...)):
 
                     emb_score = cosine_similarity(query_emb, fish_emb)
                     color_score = cosine_similarity(query_hist, fish_hist) if fish_hist is not None else 0.0
-                    # Weighted combination
                     final_score = 0.7 * emb_score + 0.3 * color_score
 
                     matches.append({
@@ -109,9 +105,10 @@ async def identify(file: UploadFile = File(...)):
                     print(f"Skipping fish ID {fish['id']} due to error: {e}")
                     continue
 
+        # ✅ Always pick the highest scoring fish even if below 0.5
         matches.sort(key=lambda x: x["score"], reverse=True)
-        best_match = next((m for m in matches if m["score"] > 0.5), None)
-        other_similar = [m for m in matches if m != best_match][:5]
+        best_match = matches[0] if matches else None
+        other_similar = matches[1:6] if len(matches) > 1 else []
 
         return {
             "matched_fish": best_match,
@@ -147,7 +144,7 @@ async def update_fish_data(request: Request):
                 resp = await client.get(url)
                 resp.raise_for_status()
                 img = Image.open(io.BytesIO(resp.content)).convert("RGB")
-                img = ImageOps.exif_transpose(img)  # fix rotation
+                img = ImageOps.exif_transpose(img)
                 return img
 
         def calculate_hash(img):
@@ -159,7 +156,7 @@ async def update_fish_data(request: Request):
             x = np.expand_dims(x, axis=0)
             x = preprocess_input(x)
             emb = model.predict(x)[0]
-            return emb / (np.linalg.norm(emb) + 1e-10)  # normalize
+            return emb / (np.linalg.norm(emb) + 1e-10)
 
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -209,9 +206,7 @@ async def update_fish_data(request: Request):
 
 @app.post("/update_all_fishes")
 async def update_all_fishes():
-    """
-    Update embeddings and hashes for all fishes in the database.
-    """
+    """Update embeddings and hashes for all fishes in the database."""
     import httpx
 
     conn = get_db_connection()
