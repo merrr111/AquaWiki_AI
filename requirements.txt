@@ -8,3 +8,4 @@ python-multipart
 mysql-connector-python
 imagehash
 httpx
+opencv-python-headless
