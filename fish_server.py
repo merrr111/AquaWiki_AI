@@ -73,7 +73,7 @@ FISH_KEYWORDS = {
     "anchovy", "stingray", "electric_ray", "hammerhead", "tiger_shark"
 }
 
-def _label_indicates_fish(decoded_preds, threshold=0.25):
+def _label_indicates_fish(decoded_preds, threshold=0.1):
     """
     decoded_preds: list of (class_id, label, prob) tuples (from decode_predictions)
     threshold: minimum probability for considering the label meaningful
@@ -85,7 +85,7 @@ def _label_indicates_fish(decoded_preds, threshold=0.25):
                 return True, float(prob), label
     return False, 0.0, None
 
-def is_fish_by_classification(img_data, prob_threshold=0.25):
+def is_fish_by_classification(img_data, prob_threshold=0.1):
     """
     Use MobileNetV2 classifier top predictions to see if image contains a fish.
     Returns True if classification suggests fish.
@@ -122,7 +122,6 @@ def is_probably_fish_heuristic(img_data):
 
         # ---- 1) Water-color detection (blue/green presence) ----
         hsv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2HSV)
-        # broad blue/green ranges (tunable)
         lower_blue = np.array([80, 30, 20])
         upper_blue = np.array([140, 255, 255])
         mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
@@ -135,25 +134,21 @@ def is_probably_fish_heuristic(img_data):
         contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if not contours:
-            # If no contours, check blue_ratio alone (maybe fish on plain water background)
-            return blue_ratio >= 0.12  # require at least ~12% water-like pixels
+            return blue_ratio >= 0.08  # relaxed threshold
 
-        # pick largest contour by area
         largest = max(contours, key=cv2.contourArea)
         area = cv2.contourArea(largest)
-        if area < (0.01 * h * w):  # object too small
+        if area < (0.005 * h * w):  # allow smaller fish
             return False
 
         x, y, cw, ch = cv2.boundingRect(largest)
         aspect_ratio = float(max(cw, ch)) / (min(cw, ch) + 1e-8)
+        elongated = aspect_ratio >= 1.4  # slightly relaxed
 
-        # Fish bodies are elongated; allow horizontal/vertical orientation
-        elongated = aspect_ratio >= 1.6
-
-        # Combine cues: (elongated contour && some water) OR (strong water presence)
-        if elongated and blue_ratio >= 0.06:
+        # Combine cues: elongated contour + water or strong water presence
+        if elongated and blue_ratio >= 0.04:
             return True
-        if blue_ratio >= 0.18:
+        if blue_ratio >= 0.12:
             return True
 
         return False
@@ -167,24 +162,16 @@ def is_fish_image(img_data):
     Master decision function:
     1) Try classification-based check (fast)
     2) If inconclusive, try heuristic (shape + water color)
-    Returns True only if either method suggests fish.
+    Returns True if either method suggests fish.
     """
-    # 1) Classification check
-    if is_fish_by_classification(img_data, prob_threshold=0.25):
-        return True
-
-    # 2) Heuristic fallback
-    if is_probably_fish_heuristic(img_data):
-        return True
-
-    return False
+    return is_fish_by_classification(img_data) or is_probably_fish_heuristic(img_data)
 
 @app.post("/identify")
 async def identify(file: UploadFile = File(...)):
     try:
         img_data = await file.read()
 
-        # --------------- Strict fish-only gate ----------------
+        # --------------- Relaxed fish-only gate ----------------
         if not is_fish_image(img_data):
             return {
                 "matched_fish": None,
@@ -193,7 +180,6 @@ async def identify(file: UploadFile = File(...)):
             }
         # -----------------------------------------------------
 
-        # At this point we know the image is likely a fish -> proceed as before
         query_emb = get_embedding(img_data)
         query_img = Image.open(io.BytesIO(img_data)).convert("RGB")
         query_hist = get_color_histogram(query_img)
@@ -229,7 +215,6 @@ async def identify(file: UploadFile = File(...)):
 
                     emb_score = cosine_similarity(query_emb, fish_emb)
                     color_score = cosine_similarity(query_hist, fish_hist) if fish_hist is not None else 0.0
-                    # Weighted combination
                     final_score = 0.7 * emb_score + 0.3 * color_score
 
                     matches.append({
@@ -283,7 +268,7 @@ async def update_fish_data(request: Request):
                 resp = await client.get(url)
                 resp.raise_for_status()
                 img = Image.open(io.BytesIO(resp.content)).convert("RGB")
-                img = ImageOps.exif_transpose(img)  # fix rotation
+                img = ImageOps.exif_transpose(img)
                 return img
 
         def calculate_hash(img):
@@ -295,24 +280,21 @@ async def update_fish_data(request: Request):
             x = np.expand_dims(x, axis=0)
             x = preprocess_input(x)
             emb = model.predict(x)[0]
-            return emb / (np.linalg.norm(emb) + 1e-10)  # normalize
+            return emb / (np.linalg.norm(emb) + 1e-10)
 
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # Female image
         female_img = await download_image(image_url)
         female_hash = calculate_hash(female_img)
         female_emb = compute_embedding(female_img)
 
-        # Male image (optional)
         male_hash, male_emb = None, None
         if image_male_url:
             male_img = await download_image(image_male_url)
             male_hash = calculate_hash(male_img)
             male_emb = compute_embedding(male_img)
 
-        # Save to database
         cursor.execute("""
             UPDATE fishes SET
                 image_hash = %s,
