@@ -2,24 +2,36 @@ from fastapi import FastAPI, UploadFile, File, Request
 import numpy as np
 import json, io, os, traceback
 from PIL import Image, ImageOps
-from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input
+from tensorflow.keras.applications.mobilenet_v2 import (
+    MobileNetV2,
+    preprocess_input,
+    decode_predictions
+)
 from tensorflow.keras.preprocessing import image
 import mysql.connector
 import tempfile
+
+# New imports
+import cv2
+import requests
 
 # Reduce TensorFlow logs
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 app = FastAPI(title="Fish Identification API")
 
-# Load the model once
+# Embedding model (existing) - use for embeddings (no top)
 model = MobileNetV2(weights="imagenet", include_top=False, pooling="avg")
 
-# === Warm up the model on startup to prevent first-upload delay ===
-print("🐟 Warming up MobileNetV2 model...")
+# Classification model (for fish / not-fish checks) - includes top
+clf_model = MobileNetV2(weights="imagenet", include_top=True)
+
+# === Warm up the models on startup to prevent first-upload delay ===
+print("Warming up MobileNetV2 models...")
 dummy = np.zeros((1, 224, 224, 3), dtype=np.float32)
 _ = model.predict(dummy)
-print("🔥 Model warmed up and ready for predictions!")
+_ = clf_model.predict(dummy)  # warm up classifier head
+print("Models warmed up and ready for predictions!")
 
 def get_db_connection():
     return mysql.connector.connect(
@@ -54,10 +66,134 @@ def cosine_similarity(vec1, vec2):
     vec2 = vec2 / (np.linalg.norm(vec2) + 1e-10)
     return float(np.dot(vec1, vec2))
 
+# Fish keywords found in ImageNet labels (common forms)
+FISH_KEYWORDS = {
+    "fish", "shark", "ray", "eel", "puffer", "lionfish", "gar", "goby",
+    "seahorse", "goldfish", "tench", "coho", "barracuda", "mackerel",
+    "anchovy", "stingray", "electric_ray", "hammerhead", "tiger_shark"
+}
+
+def _label_indicates_fish(decoded_preds, threshold=0.25):
+    """
+    decoded_preds: list of (class_id, label, prob) tuples (from decode_predictions)
+    threshold: minimum probability for considering the label meaningful
+    """
+    for (_, label, prob) in decoded_preds:
+        lab = label.lower().replace(" ", "_")
+        for keyword in FISH_KEYWORDS:
+            if keyword in lab and prob >= threshold:
+                return True, float(prob), label
+    return False, 0.0, None
+
+def is_fish_by_classification(img_data, prob_threshold=0.25):
+    """
+    Use MobileNetV2 classifier top predictions to see if image contains a fish.
+    Returns True if classification suggests fish.
+    """
+    try:
+        img = Image.open(io.BytesIO(img_data)).convert("RGB").resize((224, 224))
+        x = image.img_to_array(img)
+        x = np.expand_dims(x, axis=0)
+        x = preprocess_input(x)
+        preds = clf_model.predict(x)
+        decoded = decode_predictions(preds, top=3)[0]
+        is_fish, prob, label = _label_indicates_fish(decoded, threshold=prob_threshold)
+        return is_fish
+    except Exception as e:
+        # If classification fails for any reason, return False (we'll fallback to heuristic)
+        print("Classification check failed:", e)
+        return False
+
+def is_probably_fish_heuristic(img_data):
+    """
+    Heuristic method using color (water detection) + contours (elongated body).
+    Returns True if heuristic indicates fish-like image.
+    """
+    try:
+        # Decode image with OpenCV
+        data = np.frombuffer(img_data, np.uint8)
+        img_cv = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        if img_cv is None:
+            return False
+
+        h, w = img_cv.shape[:2]
+        if h == 0 or w == 0:
+            return False
+
+        # ---- 1) Water-color detection (blue/green presence) ----
+        hsv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2HSV)
+        # broad blue/green ranges (tunable)
+        lower_blue = np.array([80, 30, 20])
+        upper_blue = np.array([140, 255, 255])
+        mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
+        blue_ratio = np.sum(mask_blue > 0) / (h * w)
+
+        # ---- 2) Find large contours (object detection) ----
+        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (7, 7), 0)
+        edges = cv2.Canny(blur, 50, 150)
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if not contours:
+            # If no contours, check blue_ratio alone (maybe fish on plain water background)
+            return blue_ratio >= 0.12  # require at least ~12% water-like pixels
+
+        # pick largest contour by area
+        largest = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(largest)
+        if area < (0.01 * h * w):  # object too small
+            return False
+
+        x, y, cw, ch = cv2.boundingRect(largest)
+        aspect_ratio = float(max(cw, ch)) / (min(cw, ch) + 1e-8)
+
+        # Fish bodies are elongated; allow horizontal/vertical orientation
+        elongated = aspect_ratio >= 1.6
+
+        # Combine cues: (elongated contour && some water) OR (strong water presence)
+        if elongated and blue_ratio >= 0.06:
+            return True
+        if blue_ratio >= 0.18:
+            return True
+
+        return False
+
+    except Exception as e:
+        print("Heuristic fish check failed:", e)
+        return False
+
+def is_fish_image(img_data):
+    """
+    Master decision function:
+    1) Try classification-based check (fast)
+    2) If inconclusive, try heuristic (shape + water color)
+    Returns True only if either method suggests fish.
+    """
+    # 1) Classification check
+    if is_fish_by_classification(img_data, prob_threshold=0.25):
+        return True
+
+    # 2) Heuristic fallback
+    if is_probably_fish_heuristic(img_data):
+        return True
+
+    return False
+
 @app.post("/identify")
 async def identify(file: UploadFile = File(...)):
     try:
         img_data = await file.read()
+
+        # --------------- Strict fish-only gate ----------------
+        if not is_fish_image(img_data):
+            return {
+                "matched_fish": None,
+                "other_similar_fishes": [],
+                "error": "Uploaded image does not appear to be a fish. Please upload a fish image."
+            }
+        # -----------------------------------------------------
+
+        # At this point we know the image is likely a fish -> proceed as before
         query_emb = get_embedding(img_data)
         query_img = Image.open(io.BytesIO(img_data)).convert("RGB")
         query_hist = get_color_histogram(query_img)
@@ -88,7 +224,7 @@ async def identify(file: UploadFile = File(...)):
                         resp = requests.get(img_url, timeout=5)
                         fish_img = Image.open(io.BytesIO(resp.content)).convert("RGB")
                         fish_hist = get_color_histogram(fish_img)
-                    except:
+                    except Exception:
                         fish_hist = None
 
                     emb_score = cosine_similarity(query_emb, fish_emb)
