@@ -85,20 +85,10 @@ def is_fish_image(img_data, threshold=0.4):
             return True
     return False
 
-# --- Endpoints ---
 @app.post("/identify")
 async def identify(file: UploadFile = File(...)):
     try:
         img_data = await file.read()
-
-        # Human detection
-        if is_human_image(img_data):
-            return {"matched_fish": None, "other_similar_fishes": [], "error": "Image contains a human face"}
-
-        # Non-fish detection
-        if not is_fish_image(img_data):
-            return {"matched_fish": None, "other_similar_fishes": [], "error": "Image is not a fish"}
-
         query_emb = get_embedding(img_data)
         query_img = Image.open(io.BytesIO(img_data)).convert("RGB")
         query_hist = get_color_histogram(query_img)
@@ -110,8 +100,12 @@ async def identify(file: UploadFile = File(...)):
         conn.close()
 
         matches = []
+
         for fish in fishes:
-            for sex, emb_field, img_field in [("female", "embedding", "image_url"), ("male", "embedding_male", "image_male_url")]:
+            for sex, emb_field, img_field in [
+                ("female", "embedding", "image_url"),
+                ("male", "embedding_male", "image_male_url")
+            ]:
                 emb_str = fish.get(emb_field)
                 img_url = fish.get(img_field)
                 if not emb_str or not img_url:
@@ -120,16 +114,20 @@ async def identify(file: UploadFile = File(...)):
                     fish_emb = np.array(json.loads(emb_str))
                     fish_emb = fish_emb / (np.linalg.norm(fish_emb) + 1e-10)
 
+                    # Embedding similarity
+                    emb_score = cosine_similarity(query_emb, fish_emb)
+
+                    # Optional histogram similarity
                     try:
                         resp = requests.get(img_url, timeout=5)
                         fish_img = Image.open(io.BytesIO(resp.content)).convert("RGB")
                         fish_hist = get_color_histogram(fish_img)
+                        color_score = cosine_similarity(query_hist, fish_hist)
                     except:
-                        fish_hist = None
+                        color_score = 0.0  # If histogram fails, ignore
 
-                    emb_score = cosine_similarity(query_emb, fish_emb)
-                    color_score = cosine_similarity(query_hist, fish_hist) if fish_hist is not None else 0.0
-                    final_score = 0.9 * emb_score + 0.1 * color_score
+                    # Weighted combination with more weight on embeddings
+                    final_score = 0.95 * emb_score + 0.05 * color_score
 
                     matches.append({
                         "id": fish["id"],
@@ -137,21 +135,31 @@ async def identify(file: UploadFile = File(...)):
                         "matched_image_url": img_url,
                         "match_type": sex,
                         "description": fish["description"] if sex == "female" else fish.get("male_description"),
-                        "score": float(final_score)
+                        "score": float(final_score),
+                        "emb_score": float(emb_score),
+                        "color_score": float(color_score)
                     })
+
                 except Exception as e:
                     print(f"Skipping fish ID {fish['id']} due to error: {e}")
                     continue
 
+        # Sort by final score
         matches.sort(key=lambda x: x["score"], reverse=True)
-        best_match = next((m for m in matches if m["score"] > 0.4), None)
+        
+        # Lowered threshold to avoid missing fish
+        best_match = next((m for m in matches if m["score"] > 0.35), None)
         other_similar = [m for m in matches if m != best_match][:5]
+
+        # Debug info
+        print("Top matches:", [(m["name"], m["score"]) for m in matches[:5]])
 
         return {"matched_fish": best_match, "other_similar_fishes": other_similar}
 
     except Exception as e:
         traceback.print_exc()
         return {"error": "Internal server error", "details": str(e)}
+
 
 @app.get("/")
 async def root():
