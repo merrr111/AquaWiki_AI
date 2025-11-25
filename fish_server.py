@@ -6,6 +6,8 @@ from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_i
 from tensorflow.keras.preprocessing import image
 import mysql.connector
 import tempfile
+import requests
+import cv2
 
 # Reduce TensorFlow logs
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
@@ -20,6 +22,9 @@ print("Warming up MobileNetV2 model...")
 dummy = np.zeros((1, 224, 224, 3), dtype=np.float32)
 _ = model.predict(dummy)
 print("Model warmed up and ready for predictions!")
+
+# Load Haar Cascade for face detection (human blocking)
+face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
 
 def get_db_connection():
     return mysql.connector.connect(
@@ -54,10 +59,22 @@ def cosine_similarity(vec1, vec2):
     vec2 = vec2 / (np.linalg.norm(vec2) + 1e-10)
     return float(np.dot(vec1, vec2))
 
+def is_human_image(img_data):
+    """Return True if a human face is detected"""
+    img_array = np.array(Image.open(io.BytesIO(img_data)).convert("RGB"))
+    gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
+    return len(faces) > 0
+
 @app.post("/identify")
 async def identify(file: UploadFile = File(...)):
     try:
         img_data = await file.read()
+
+        # Block human images
+        if is_human_image(img_data):
+            return {"matched_fish": None, "other_similar_fishes": [], "error": "Image contains a human face"}
+
         query_emb = get_embedding(img_data)
         query_img = Image.open(io.BytesIO(img_data)).convert("RGB")
         query_hist = get_color_histogram(query_img)
@@ -249,4 +266,3 @@ if __name__ == "__main__":
         port=int(os.getenv("PORT", 10000)),
         log_level="info"
     )
-
