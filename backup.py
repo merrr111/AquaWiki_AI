@@ -5,8 +5,7 @@ from PIL import Image, ImageOps
 from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input
 from tensorflow.keras.preprocessing import image
 import mysql.connector
-import requests
-import cv2
+import tempfile
 
 # Reduce TensorFlow logs
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
@@ -21,11 +20,6 @@ print("Warming up MobileNetV2 model...")
 dummy = np.zeros((1, 224, 224, 3), dtype=np.float32)
 _ = model.predict(dummy)
 print("Model warmed up and ready for predictions!")
-
-# Load Haar Cascade for face detection (human blocking)
-face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
-
-# --- Helper Functions ---
 
 def get_db_connection():
     return mysql.connector.connect(
@@ -48,6 +42,7 @@ def get_embedding(img_data):
     return emb / (np.linalg.norm(emb) + 1e-10)  # normalize
 
 def get_color_histogram(img, bins=16):
+    """Compute normalized RGB histogram"""
     hist_r = np.histogram(np.array(img)[:, :, 0], bins=bins, range=(0, 256))[0]
     hist_g = np.histogram(np.array(img)[:, :, 1], bins=bins, range=(0, 256))[0]
     hist_b = np.histogram(np.array(img)[:, :, 2], bins=bins, range=(0, 256))[0]
@@ -59,45 +54,10 @@ def cosine_similarity(vec1, vec2):
     vec2 = vec2 / (np.linalg.norm(vec2) + 1e-10)
     return float(np.dot(vec1, vec2))
 
-def is_human_image(img_data):
-    img_array = np.array(Image.open(io.BytesIO(img_data)).convert("RGB"))
-    gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
-    return len(faces) > 0
-
-# --- Non-fish check using embeddings ---
-# Precompute reference fish embeddings once
-reference_fish_paths = ["fish_ref1.jpg", "fish_ref2.jpg"]  # Add a few good reference fish images
-reference_embeddings = []
-
-for path in reference_fish_paths:
-    with open(path, "rb") as f:
-        img_data = f.read()
-        reference_embeddings.append(get_embedding(img_data))
-
-def is_fish_image(img_data, threshold=0.4):
-    """Return True if the uploaded image embedding is similar to reference fish embeddings."""
-    query_emb = get_embedding(img_data)
-    for ref_emb in reference_embeddings:
-        if cosine_similarity(query_emb, ref_emb) > threshold:
-            return True
-    return False
-
-# --- Endpoints ---
-
 @app.post("/identify")
 async def identify(file: UploadFile = File(...)):
     try:
         img_data = await file.read()
-
-        # Block human images
-        if is_human_image(img_data):
-            return {"matched_fish": None, "other_similar_fishes": [], "error": "Image contains a human face"}
-
-        # Block non-fish images
-        if not is_fish_image(img_data):
-            return {"matched_fish": None, "other_similar_fishes": [], "error": "Image is not a fish"}
-
         query_emb = get_embedding(img_data)
         query_img = Image.open(io.BytesIO(img_data)).convert("RGB")
         query_hist = get_color_histogram(query_img)
@@ -123,6 +83,7 @@ async def identify(file: UploadFile = File(...)):
                     fish_emb = np.array(json.loads(emb_str))
                     fish_emb = fish_emb / (np.linalg.norm(fish_emb) + 1e-10)
 
+                    # Compute histogram for comparison
                     try:
                         resp = requests.get(img_url, timeout=5)
                         fish_img = Image.open(io.BytesIO(resp.content)).convert("RGB")
@@ -132,6 +93,7 @@ async def identify(file: UploadFile = File(...)):
 
                     emb_score = cosine_similarity(query_emb, fish_emb)
                     color_score = cosine_similarity(query_hist, fish_hist) if fish_hist is not None else 0.0
+                    # Weighted combination
                     final_score = 0.9 * emb_score + 0.1 * color_score
 
                     matches.append({
@@ -170,6 +132,7 @@ async def update_fish_data_get():
 
 @app.post("/update_fish_data")
 async def update_fish_data(request: Request):
+    """Generate embeddings & hashes for a fish after upload (async image download)"""
     import imagehash
     import httpx
 
@@ -184,7 +147,7 @@ async def update_fish_data(request: Request):
                 resp = await client.get(url)
                 resp.raise_for_status()
                 img = Image.open(io.BytesIO(resp.content)).convert("RGB")
-                img = ImageOps.exif_transpose(img)
+                img = ImageOps.exif_transpose(img)  # fix rotation
                 return img
 
         def calculate_hash(img):
@@ -196,7 +159,7 @@ async def update_fish_data(request: Request):
             x = np.expand_dims(x, axis=0)
             x = preprocess_input(x)
             emb = model.predict(x)[0]
-            return emb / (np.linalg.norm(emb) + 1e-10)
+            return emb / (np.linalg.norm(emb) + 1e-10)  # normalize
 
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -206,13 +169,14 @@ async def update_fish_data(request: Request):
         female_hash = calculate_hash(female_img)
         female_emb = compute_embedding(female_img)
 
-        # Male image
+        # Male image (optional)
         male_hash, male_emb = None, None
         if image_male_url:
             male_img = await download_image(image_male_url)
             male_hash = calculate_hash(male_img)
             male_emb = compute_embedding(male_img)
 
+        # Save to database
         cursor.execute("""
             UPDATE fishes SET
                 image_hash = %s,
@@ -245,6 +209,9 @@ async def update_fish_data(request: Request):
 
 @app.post("/update_all_fishes")
 async def update_all_fishes():
+    """
+    Update embeddings and hashes for all fishes in the database.
+    """
     import httpx
 
     conn = get_db_connection()
@@ -273,7 +240,7 @@ async def update_all_fishes():
 
     return {"status": "success", "results": results}
 
-# Run directly
+# Run directly (Render entry point)
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
