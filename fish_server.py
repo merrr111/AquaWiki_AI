@@ -6,8 +6,6 @@ from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_i
 from tensorflow.keras.preprocessing import image
 import mysql.connector
 import tempfile
-import requests
-import cv2
 
 # Reduce TensorFlow logs
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
@@ -56,37 +54,10 @@ def cosine_similarity(vec1, vec2):
     vec2 = vec2 / (np.linalg.norm(vec2) + 1e-10)
     return float(np.dot(vec1, vec2))
 
-# --- New helper: quick human/non-fish filter ---
-def is_probably_fish(img_data, blue_threshold=0.08):
-    """Check if the image contains water-like colors to filter out humans."""
-    try:
-        data = np.frombuffer(img_data, np.uint8)
-        img_cv = cv2.imdecode(data, cv2.IMREAD_COLOR)
-        if img_cv is None:
-            return False
-        h, w = img_cv.shape[:2]
-        hsv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2HSV)
-        lower_blue = np.array([80, 30, 20])
-        upper_blue = np.array([140, 255, 255])
-        mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
-        blue_ratio = np.sum(mask_blue > 0) / (h * w)
-        return blue_ratio >= blue_threshold
-    except Exception:
-        return False
-
 @app.post("/identify")
 async def identify(file: UploadFile = File(...)):
     try:
         img_data = await file.read()
-
-        # Early rejection for non-fish images
-        if not is_probably_fish(img_data, blue_threshold=0.08):
-            return {
-                "matched_fish": None,
-                "other_similar_fishes": [],
-                "error": "Uploaded image does not appear to be a fish. Please upload a fish image."
-            }
-
         query_emb = get_embedding(img_data)
         query_img = Image.open(io.BytesIO(img_data)).convert("RGB")
         query_hist = get_color_histogram(query_img)
@@ -122,8 +93,7 @@ async def identify(file: UploadFile = File(...)):
 
                     emb_score = cosine_similarity(query_emb, fish_emb)
                     color_score = cosine_similarity(query_hist, fish_hist) if fish_hist is not None else 0.0
-
-                    # Lower histogram weight to reduce human/background false positives
+                    # Weighted combination
                     final_score = 0.9 * emb_score + 0.1 * color_score
 
                     matches.append({
@@ -140,7 +110,7 @@ async def identify(file: UploadFile = File(...)):
                     continue
 
         matches.sort(key=lambda x: x["score"], reverse=True)
-        best_match = next((m for m in matches if m["score"] > 0.3), None)
+        best_match = next((m for m in matches if m["score"] > 0.4), None)
         other_similar = [m for m in matches if m != best_match][:5]
 
         return {
@@ -279,3 +249,4 @@ if __name__ == "__main__":
         port=int(os.getenv("PORT", 10000)),
         log_level="info"
     )
+
