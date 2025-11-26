@@ -5,30 +5,27 @@ from PIL import Image, ImageOps
 from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input
 from tensorflow.keras.preprocessing import image
 import mysql.connector
-import requests
+import tempfile
 import cv2
+import requests
+
+# Load Haar Cascade for face detection
+face_cascade = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
 
 # Reduce TensorFlow logs
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 app = FastAPI(title="Fish Identification API")
 
-# Load MobileNetV2 model once
+# Load the model once
 model = MobileNetV2(weights="imagenet", include_top=False, pooling="avg")
 
-# Warm up model on startup
+# === Warm up the model on startup to prevent first-upload delay ===
 print("Warming up MobileNetV2 model...")
 dummy = np.zeros((1, 224, 224, 3), dtype=np.float32)
 _ = model.predict(dummy)
-print("Model warmed up!")
+print("Model warmed up and ready for predictions!")
 
-# Haar Cascade for human detection
-cascade_path = os.path.join(os.path.dirname(__file__), 'haarcascade_frontalface_default.xml')
-face_cascade = cv2.CascadeClassifier(cascade_path)
-if face_cascade.empty():
-    print("Warning: Haar cascade not loaded! Human detection will be skipped.")
-
-# --- Helper Functions ---
 def get_db_connection():
     return mysql.connector.connect(
         host="srv2088.hstgr.io",
@@ -39,6 +36,7 @@ def get_db_connection():
     )
 
 def get_embedding(img_data):
+    # Fix EXIF rotation
     img = Image.open(io.BytesIO(img_data)).convert("RGB")
     img = ImageOps.exif_transpose(img)
     img_resized = img.resize((224, 224))
@@ -46,9 +44,10 @@ def get_embedding(img_data):
     x = np.expand_dims(x, axis=0)
     x = preprocess_input(x)
     emb = model.predict(x)[0]
-    return emb / (np.linalg.norm(emb) + 1e-10)
+    return emb / (np.linalg.norm(emb) + 1e-10)  # normalize
 
 def get_color_histogram(img, bins=16):
+    """Compute normalized RGB histogram"""
     hist_r = np.histogram(np.array(img)[:, :, 0], bins=bins, range=(0, 256))[0]
     hist_g = np.histogram(np.array(img)[:, :, 1], bins=bins, range=(0, 256))[0]
     hist_b = np.histogram(np.array(img)[:, :, 2], bins=bins, range=(0, 256))[0]
@@ -57,47 +56,33 @@ def get_color_histogram(img, bins=16):
 
 def cosine_similarity(vec1, vec2):
     vec1 = vec1 / (np.linalg.norm(vec1) + 1e-10)
-    vec2 = vec2 / (np.linalg.norm(vec2) + 1e-10)
+    vec2 = vec2  / (np.linalg.norm(vec2) + 1e-10)
     return float(np.dot(vec1, vec2))
 
-def is_human_image(img_data):
-    if face_cascade.empty():
-        return False
-    img_array = np.array(Image.open(io.BytesIO(img_data)).convert("RGB"))
-    gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
-    return len(faces) > 0
-
-# Non-fish check
-reference_fish_paths = ["fish_ref1.jpg", "fish_ref2.jpg"]
-reference_embeddings = []
-for path in reference_fish_paths:
-    if os.path.exists(path):
-        with open(path, "rb") as f:
-            reference_embeddings.append(get_embedding(f.read()))
-
-def is_fish_image(img_data, threshold=0.4):
-    if not reference_embeddings:
-        return True
-    query_emb = get_embedding(img_data)
-    for ref_emb in reference_embeddings:
-        if cosine_similarity(query_emb, ref_emb) > threshold:
-            return True
-    return False
-
-# --- Endpoints ---
 @app.post("/identify")
 async def identify(file: UploadFile = File(...)):
     try:
         img_data = await file.read()
 
-        # Human detection
-        if is_human_image(img_data):
-            return {"matched_fish": None, "other_similar_fishes": [], "error": "Image contains a human face"}
+        # === HUMAN FACE DETECTION (Reject humans) ===
+        np_img = np.frombuffer(img_data, np.uint8)
+        cv2_img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
 
-        # Non-fish detection
-        if not is_fish_image(img_data):
-            return {"matched_fish": None, "other_similar_fishes": [], "error": "Image is not a fish"}
+        if cv2_img is not None:
+            gray = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(
+                gray,
+                scaleFactor=1.1,
+                minNeighbors=5,
+                minSize=(80, 80)
+            )
+            if len(faces) > 0:
+                return {
+                    "matched_fish": None,
+                    "other_similar_fishes": [],
+                    "human_detected": True,
+                    "message": "A human face was detected. Please upload a fish image."
+                }
 
         query_emb = get_embedding(img_data)
         query_img = Image.open(io.BytesIO(img_data)).convert("RGB")
@@ -110,8 +95,12 @@ async def identify(file: UploadFile = File(...)):
         conn.close()
 
         matches = []
+
         for fish in fishes:
-            for sex, emb_field, img_field in [("female", "embedding", "image_url"), ("male", "embedding_male", "image_male_url")]:
+            for sex, emb_field, img_field in [
+                ("female", "embedding", "image_url"),
+                ("male", "embedding_male", "image_male_url")
+            ]:
                 emb_str = fish.get(emb_field)
                 img_url = fish.get(img_field)
                 if not emb_str or not img_url:
@@ -120,6 +109,7 @@ async def identify(file: UploadFile = File(...)):
                     fish_emb = np.array(json.loads(emb_str))
                     fish_emb = fish_emb / (np.linalg.norm(fish_emb) + 1e-10)
 
+                    # Compute histogram
                     try:
                         resp = requests.get(img_url, timeout=5)
                         fish_img = Image.open(io.BytesIO(resp.content)).convert("RGB")
@@ -139,15 +129,19 @@ async def identify(file: UploadFile = File(...)):
                         "description": fish["description"] if sex == "female" else fish.get("male_description"),
                         "score": float(final_score)
                     })
+
                 except Exception as e:
                     print(f"Skipping fish ID {fish['id']} due to error: {e}")
                     continue
 
         matches.sort(key=lambda x: x["score"], reverse=True)
-        best_match = next((m for m in matches if m["score"] > 0.45), None)
+        best_match = next((m for m in matches if m["score"] > 0.4), None)
         other_similar = [m for m in matches if m != best_match][:5]
 
-        return {"matched_fish": best_match, "other_similar_fishes": other_similar}
+        return {
+            "matched_fish": best_match,
+            "other_similar_fishes": other_similar
+        }
 
     except Exception as e:
         traceback.print_exc()
@@ -157,7 +151,6 @@ async def identify(file: UploadFile = File(...)):
 async def root():
     return {"message": "Welcome to the Fish Identification API"}
 
-# --- Update Fish Data ---
 @app.get("/update_fish_data")
 async def update_fish_data_get():
     return {"message": "This endpoint only accepts POST requests."}
@@ -166,6 +159,7 @@ async def update_fish_data_get():
 async def update_fish_data(request: Request):
     import imagehash
     import httpx
+
     try:
         data = await request.json()
         fish_id = data.get("fish_id")
@@ -227,14 +221,17 @@ async def update_fish_data(request: Request):
             conn.rollback()
         traceback.print_exc()
         return {"status": "error", "message": str(e)}
-    finally:
-        if 'cursor' in locals(): cursor.close()
-        if 'conn' in locals(): conn.close()
 
-# --- Update All Fishes ---
+    finally:
+        if 'cursor' in locals():
+            cursor.close()
+        if 'conn' in locals():
+            conn.close()
+
 @app.post("/update_all_fishes")
 async def update_all_fishes():
     import httpx
+
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
     cursor.execute("SELECT id, image_url, image_male_url FROM fishes")
@@ -243,11 +240,12 @@ async def update_all_fishes():
     conn.close()
 
     results = []
+
     async with httpx.AsyncClient(timeout=60.0) as client:
         for fish in fishes:
             try:
                 resp = await client.post(
-                    "https://your-deployed-url/update_fish_data",
+                    "https://aquawiki-ai-1bh3.onrender.com/update_fish_data",
                     json={
                         "fish_id": fish["id"],
                         "image_url": fish["image_url"],
@@ -260,7 +258,12 @@ async def update_all_fishes():
 
     return {"status": "success", "results": results}
 
-# --- Run directly ---
+# Run directly (Render entry point)
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("fish_server:app", host="0.0.0.0", port=int(os.getenv("PORT", 10000)), log_level="info")
+    uvicorn.run(
+        "fish_server:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 10000)),
+        log_level="info"
+    )
