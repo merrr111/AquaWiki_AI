@@ -123,10 +123,10 @@ async def identify(file: UploadFile = File(...)):
             }
 
         # ---- NORMAL FISH IDENTIFICATION ----
-        best_match = next((m for m in matches if m["score"] > 0.4 and m["histogram_score"] > 0.1), None)
+        best_match = next((m for m in matches if m["score"] > 0.48 and m["histogram_score"] > 0.1), None)
 
         # Only include other similar fishes with score above 0.5
-        min_similarity = 0.5
+        min_similarity = 0.45
         other_similar = [m for m in matches if m != best_match and m["score"] > min_similarity and m["histogram_score"] > 0.1][:5]
 
         return {
