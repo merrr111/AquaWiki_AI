@@ -51,6 +51,10 @@ async def identify(file: UploadFile = File(...)):
         img_data = await file.read()
         query_emb = get_embedding(img_data)
 
+        # Also load image for histogram comparison
+        query_img = Image.open(io.BytesIO(img_data)).convert("RGB")
+        query_img = ImageOps.exif_transpose(query_img)
+
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
         cursor.execute("SELECT * FROM fishes")
@@ -76,22 +80,38 @@ async def identify(file: UploadFile = File(...)):
 
                     final_score = cosine_similarity(query_emb, fish_emb)
 
+                    # --- Histogram similarity ---
+                    try:
+                        # Load fish image
+                        from urllib.request import urlopen
+                        fish_img = Image.open(urlopen(img_url)).convert("RGB")
+                        fish_img = ImageOps.exif_transpose(fish_img)
+                        # Resize to same size
+                        fish_img_resized = fish_img.resize((224, 224))
+                        query_img_resized = query_img.resize((224, 224))
+                        # Compute histograms
+                        h1 = np.array(query_img_resized.histogram())
+                        h2 = np.array(fish_img_resized.histogram())
+                        hist_score = float(np.dot(h1, h2) / (np.linalg.norm(h1)*np.linalg.norm(h2) + 1e-10))
+                    except:
+                        hist_score = 0.0
+
                     matches.append({
                         "id": fish["id"],
                         "name": fish["name"],
                         "matched_image_url": img_url,
                         "match_type": sex,
                         "description": fish["description"] if sex == "female" else fish.get("male_description"),
-                        "score": float(final_score)
+                        "score": float(final_score),
+                        "histogram_score": hist_score
                     })
 
                 except:
                     continue
 
-        # Sort matches
+        # Sort matches by cosine similarity
         matches.sort(key=lambda x: x["score"], reverse=True)
 
-        # Highest score among all fishes
         best_overall_score = matches[0]["score"] if matches else 0.0
 
         if best_overall_score < 0.25:
@@ -118,6 +138,7 @@ async def identify(file: UploadFile = File(...)):
     except Exception as e:
         traceback.print_exc()
         return {"error": "Internal server error", "details": str(e)}
+
 
 @app.get("/")
 async def root():
