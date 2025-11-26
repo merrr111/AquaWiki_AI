@@ -72,9 +72,9 @@ async def identify(file: UploadFile = File(...)):
             gray = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY)
             faces = face_cascade.detectMultiScale(
                 gray,
-                scaleFactor=1.1,
-                minNeighbors=5,
-                minSize=(80, 80)
+                scaleFactor=1.2,
+                minNeighbors=8,
+                minSize=(120, 120)
             )
             if len(faces) > 0:
                 return {
