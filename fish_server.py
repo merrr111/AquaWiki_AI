@@ -85,17 +85,34 @@ async def identify(file: UploadFile = File(...)):
                         "score": float(final_score)
                     })
 
-                except Exception as e:
-                    print(f"Skipping fish ID {fish['id']} due to error: {e}")
+                except:
                     continue
 
+        # Sort matches
         matches.sort(key=lambda x: x["score"], reverse=True)
+
+        # Highest score among all fishes
+        best_overall_score = matches[0]["score"] if matches else 0.0
+
+        if best_overall_score < 0.25:
+            return {
+                "matched_fish": None,
+                "other_similar_fishes": [],
+                "not_fish": True,
+                "reason": "The image does not appear to be a fish."
+            }
+
+        # ---- NORMAL FISH IDENTIFICATION ----
         best_match = next((m for m in matches if m["score"] > 0.4), None)
-        other_similar = [m for m in matches if m != best_match][:5]
+
+        # Only include other similar fishes with score above 0.5
+        min_similarity = 0.5
+        other_similar = [m for m in matches if m != best_match and m["score"] > min_similarity][:5]
 
         return {
             "matched_fish": best_match,
-            "other_similar_fishes": other_similar
+            "other_similar_fishes": other_similar,
+            "not_fish": False
         }
 
     except Exception as e:
