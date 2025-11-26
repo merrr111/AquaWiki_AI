@@ -6,11 +6,6 @@ from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_i
 from tensorflow.keras.preprocessing import image
 import mysql.connector
 import tempfile
-import cv2
-import requests
-
-# Load Haar Cascade for face detection
-face_cascade = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
 
 # Reduce TensorFlow logs
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
@@ -20,7 +15,7 @@ app = FastAPI(title="Fish Identification API")
 # Load the model once
 model = MobileNetV2(weights="imagenet", include_top=False, pooling="avg")
 
-# === Warm up the model on startup to prevent first-upload delay ===
+# === Warm up the model ===
 print("Warming up MobileNetV2 model...")
 dummy = np.zeros((1, 224, 224, 3), dtype=np.float32)
 _ = model.predict(dummy)
@@ -36,7 +31,6 @@ def get_db_connection():
     )
 
 def get_embedding(img_data):
-    # Fix EXIF rotation
     img = Image.open(io.BytesIO(img_data)).convert("RGB")
     img = ImageOps.exif_transpose(img)
     img_resized = img.resize((224, 224))
@@ -44,49 +38,18 @@ def get_embedding(img_data):
     x = np.expand_dims(x, axis=0)
     x = preprocess_input(x)
     emb = model.predict(x)[0]
-    return emb / (np.linalg.norm(emb) + 1e-10)  # normalize
+    return emb / (np.linalg.norm(emb) + 1e-10)
 
-def get_color_histogram(img, bins=16):
-    """Compute normalized RGB histogram"""
-    hist_r = np.histogram(np.array(img)[:, :, 0], bins=bins, range=(0, 256))[0]
-    hist_g = np.histogram(np.array(img)[:, :, 1], bins=bins, range=(0, 256))[0]
-    hist_b = np.histogram(np.array(img)[:, :, 2], bins=bins, range=(0, 256))[0]
-    hist = np.concatenate([hist_r, hist_g, hist_b]).astype(np.float32)
-    return hist / (np.linalg.norm(hist) + 1e-10)
-
-def cosine_similarity(vec1, vec2):
-    vec1 = vec1 / (np.linalg.norm(vec1) + 1e-10)
-    vec2 = vec2  / (np.linalg.norm(vec2) + 1e-10)
-    return float(np.dot(vec1, vec2))
+def cosine_similarity(a, b):
+    a = a / (np.linalg.norm(a) + 1e-10)
+    b = b / (np.linalg.norm(b) + 1e-10)
+    return float(np.dot(a, b))
 
 @app.post("/identify")
 async def identify(file: UploadFile = File(...)):
     try:
         img_data = await file.read()
-
-        # === HUMAN FACE DETECTION (Reject humans) ===
-        np_img = np.frombuffer(img_data, np.uint8)
-        cv2_img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
-
-        if cv2_img is not None:
-            gray = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY)
-            faces = face_cascade.detectMultiScale(
-                gray,
-                scaleFactor=1.2,
-                minNeighbors=8,
-                minSize=(120, 120)
-            )
-            if len(faces) > 0:
-                return {
-                    "matched_fish": None,
-                    "other_similar_fishes": [],
-                    "human_detected": True,
-                    "message": "A human face was detected. Please upload a fish image."
-                }
-
         query_emb = get_embedding(img_data)
-        query_img = Image.open(io.BytesIO(img_data)).convert("RGB")
-        query_hist = get_color_histogram(query_img)
 
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
@@ -103,23 +66,15 @@ async def identify(file: UploadFile = File(...)):
             ]:
                 emb_str = fish.get(emb_field)
                 img_url = fish.get(img_field)
+
                 if not emb_str or not img_url:
                     continue
+
                 try:
                     fish_emb = np.array(json.loads(emb_str))
                     fish_emb = fish_emb / (np.linalg.norm(fish_emb) + 1e-10)
 
-                    # Compute histogram
-                    try:
-                        resp = requests.get(img_url, timeout=5)
-                        fish_img = Image.open(io.BytesIO(resp.content)).convert("RGB")
-                        fish_hist = get_color_histogram(fish_img)
-                    except:
-                        fish_hist = None
-
-                    emb_score = cosine_similarity(query_emb, fish_emb)
-                    color_score = cosine_similarity(query_hist, fish_hist) if fish_hist is not None else 0.0
-                    final_score = 0.9 * emb_score + 0.1 * color_score
+                    final_score = cosine_similarity(query_emb, fish_emb)
 
                     matches.append({
                         "id": fish["id"],
@@ -159,7 +114,6 @@ async def update_fish_data_get():
 async def update_fish_data(request: Request):
     import imagehash
     import httpx
-
     try:
         data = await request.json()
         fish_id = data.get("fish_id")
@@ -258,7 +212,6 @@ async def update_all_fishes():
 
     return {"status": "success", "results": results}
 
-# Run directly (Render entry point)
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
